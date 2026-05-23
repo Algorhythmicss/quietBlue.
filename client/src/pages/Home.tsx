@@ -7,6 +7,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import VoiceLayer from "../components/VoiceLayer";
+import WelcomeCard from "../components/WelcomeCard";
 import SessionSettings, {
   useVoiceSettings,
   SettingsIconButton,
@@ -171,6 +172,8 @@ export default function Home() {
 
   return (
     <>
+      <WelcomeCard onOpenSettings={() => setShowSettings(true)} />
+
       {/* Background */}
       <div className="fixed inset-0 z-0">
         <img
