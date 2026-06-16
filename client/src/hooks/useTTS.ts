@@ -178,6 +178,8 @@ export function useTTS(options?: UseTTSOptions): UseTTSReturn {
 
       setError(null);
 
+      unlockAudio();
+
       try {
         const res = await fetch(TTS_URL, {
           method: "POST",
@@ -235,7 +237,7 @@ export function useTTS(options?: UseTTSOptions): UseTTSReturn {
         setError("Couldn't play audio");
       }
     },
-    [speed, voice, stop, playWithWebAudio, playWithElement]
+    [speed, voice, stop, playWithWebAudio, playWithElement, unlockAudio]
   );
 
   useEffect(() => {

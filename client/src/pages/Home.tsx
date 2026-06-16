@@ -16,11 +16,14 @@ import {
   isFeelItResult,
   type LookupResult as Result,
 } from "../types/lookup";
-import { apiUrl } from "../lib/apiBase";
+import {
+  fetchLookup,
+  resolveLookupWord,
+} from "../lib/lookupWord";
 
 type Mode = "quick" | "simple" | "feel-it";
 
-interface BookContext {
+interface BookContextState {
   bookName: string;
   description: string;
 }
@@ -40,7 +43,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tooltip, setTooltip] = useState<Mode | null>(null);
-  const [bookContext, setBookContext] = useState<BookContext | null>(null);
+  const [bookContext, setBookContext] = useState<BookContextState | null>(null);
   const [showBookDialog, setShowBookDialog] = useState(false);
   const [bookDraft, setBookDraft] = useState({ bookName: "", description: "" });
   const [hoverMode, setHoverMode] = useState<Mode | null>(null);
@@ -127,37 +130,29 @@ export default function Home() {
       return;
     }
 
+    const word = resolveLookupWord(trimmed);
+    if (!word) {
+      setError("Couldn't find a word to look up. Try a single word or phrase.");
+      setResult(null);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     setResult(null);
 
     try {
-      const body: Record<string, unknown> = {
-        word: trimmed,
-        mode: activeMode,
-      };
-      if (activeMode === "feel-it" && bookContext) {
-        body.bookContext = bookContext;
-      }
-
-      const res = await fetch(apiUrl("/api/lookup"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(
-          (data as { error?: string }).error || "Something went wrong."
-        );
-        return;
-      }
-
-      const data = await res.json();
-      setResult(data as Result);
-    } catch {
-      setError("Could not connect to the server.");
+      const data = await fetchLookup(
+        word,
+        activeMode,
+        activeMode === "feel-it" ? bookContext ?? undefined : undefined,
+      );
+      setQuery(data.word);
+      setResult(data);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not connect to the server.",
+      );
     } finally {
       setLoading(false);
     }
@@ -645,6 +640,11 @@ export default function Home() {
           onResult={(data) => {
             setError(null);
             setResult(data);
+          }}
+          onError={setError}
+          onLoading={(loading) => {
+            setLoading(loading);
+            if (loading) setResult(null);
           }}
         />
       </div>

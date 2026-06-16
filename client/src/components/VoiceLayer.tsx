@@ -3,9 +3,8 @@ import MicButton from "./MicButton";
 import { useVoiceSettings } from "./SessionSettings";
 import { useDeepgramSTT } from "../hooks/useDeepgramSTT";
 import { useTTS } from "../hooks/useTTS";
-import { extractTargetWord } from "../lib/extractWord";
+import { fetchLookup, resolveLookupWord } from "../lib/lookupWord";
 import { playPing } from "../lib/playPing";
-import { apiUrl } from "../lib/apiBase";
 import type { LookupResult } from "../types/lookup";
 
 type VoiceMode = "quick" | "simple" | "feel-it";
@@ -23,6 +22,8 @@ export interface VoiceLayerProps {
   sessionMinutes?: number;
   onResult?: (result: LookupResult) => void;
   onQuery?: (word: string) => void;
+  onError?: (message: string | null) => void;
+  onLoading?: (loading: boolean) => void;
 }
 
 function buildSpeakText(
@@ -48,6 +49,8 @@ export default function VoiceLayer({
   sessionMinutes: sessionMinutesOverride,
   onResult,
   onQuery,
+  onError,
+  onLoading,
 }: VoiceLayerProps) {
   const [settings] = useVoiceSettings();
   const micMode = micModeOverride ?? settings.micMode;
@@ -55,7 +58,6 @@ export default function VoiceLayer({
   const { speed, voice, speakWordFirst } = settings;
 
   const [status, setStatus] = useState<VoiceStatus>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const fetchingRef = useRef(false);
   const modeRef = useRef(mode);
@@ -64,6 +66,8 @@ export default function VoiceLayer({
   const speakWordFirstRef = useRef(speakWordFirst);
   const onResultRef = useRef(onResult);
   const onQueryRef = useRef(onQuery);
+  const onErrorRef = useRef(onError);
+  const onLoadingRef = useRef(onLoading);
   const sttStopRef = useRef<() => void>(() => {});
   const lastPingAtRef = useRef(0);
 
@@ -98,6 +102,14 @@ export default function VoiceLayer({
     onQueryRef.current = onQuery;
   }, [onQuery]);
 
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
+
+  useEffect(() => {
+    onLoadingRef.current = onLoading;
+  }, [onLoading]);
+
   const tts = useTTS({ speed, voice });
 
   const handleTranscript = useCallback(
@@ -109,44 +121,37 @@ export default function VoiceLayer({
       };
 
       try {
-        const word = extractTargetWord(transcript);
-        if (!word) return;
+        const word = resolveLookupWord(transcript);
+        if (!word) {
+          onErrorRef.current?.(
+            "Couldn't find a word to look up. Try a single word or phrase.",
+          );
+          return;
+        }
 
         const currentMode = modeRef.current;
         const ctx = bookContextRef.current;
 
         if (currentMode === "feel-it" && !ctx?.bookName) {
-          setErrorMessage("Book context required for feel-it mode.");
-          setStatus("error");
+          onErrorRef.current?.("Book context required for feel-it mode.");
           return;
         }
 
         fetchingRef.current = true;
         setStatus("fetching");
-        setErrorMessage(null);
+        onErrorRef.current?.(null);
+        onLoadingRef.current?.(true);
         pingFeedback();
 
-        const body: Record<string, unknown> = { word, mode: currentMode };
-        if (currentMode === "feel-it" && ctx) {
-          body.bookContext = ctx;
-        }
+        const data = await fetchLookup(
+          word,
+          currentMode,
+          currentMode === "feel-it" ? ctx : undefined,
+        );
 
-        const res = await fetch(apiUrl("/api/lookup"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(
-            (data as { error?: string }).error || "Lookup failed.",
-          );
-        }
-
-        const data = (await res.json()) as LookupResult;
         onQueryRef.current?.(data.word);
         onResultRef.current?.(data);
+        onLoadingRef.current?.(false);
 
         const speakText = buildSpeakText(
           data.word,
@@ -160,10 +165,10 @@ export default function VoiceLayer({
         fetchingRef.current = false;
       } catch (err) {
         fetchingRef.current = false;
-        setErrorMessage(
+        onLoadingRef.current?.(false);
+        onErrorRef.current?.(
           err instanceof Error ? err.message : "Something went wrong.",
         );
-        setStatus("error");
       } finally {
         stopIfPushMode();
       }
@@ -178,12 +183,7 @@ export default function VoiceLayer({
   sttStopRef.current = stt.stop;
 
   useEffect(() => {
-    const micError = errorMessage ?? stt.error;
-
-    if (micError) {
-      if (stt.error && stt.error !== errorMessage) {
-        setErrorMessage(stt.error);
-      }
+    if (stt.error) {
       setStatus("error");
       return;
     }
@@ -204,7 +204,7 @@ export default function VoiceLayer({
     }
 
     setStatus("idle");
-  }, [errorMessage, stt.isListening, stt.error, tts.isSpeaking]);
+  }, [stt.isListening, stt.error, tts.isSpeaking]);
 
   useEffect(() => {
     if (tts.error) {
@@ -212,10 +212,8 @@ export default function VoiceLayer({
     }
   }, [tts.error]);
 
-  const micError = errorMessage ?? stt.error;
-
   const handleMicStart = () => {
-    setErrorMessage(null);
+    onErrorRef.current?.(null);
     tts.unlockAudio();
     void stt.start();
   };
@@ -227,7 +225,7 @@ export default function VoiceLayer({
   const showStatusCard =
     status === "listening" ||
     status === "fetching" ||
-    (status === "error" && !!micError);
+    (status === "error" && !!stt.error);
 
   return (
     <div className="voice-layer">
@@ -239,7 +237,7 @@ export default function VoiceLayer({
         isSpeaking={tts.isSpeaking}
         onStart={handleMicStart}
         onStop={handleMicStop}
-        error={micError}
+        error={stt.error}
       />
 
       {showStatusCard && (
@@ -263,7 +261,7 @@ export default function VoiceLayer({
               ? "Listening…"
               : status === "fetching"
                 ? "Looking up…"
-                : micError}
+                : stt.error}
           </span>
         </div>
       )}
