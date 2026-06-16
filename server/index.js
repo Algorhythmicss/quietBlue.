@@ -329,6 +329,36 @@ app.get("/api/deepgram-token", async (req, res) => {
     return res.status(503).json({ error: "DEEPGRAM_API_KEY not configured" });
   }
 
+  // Prefer short-lived JWT for browser WebSocket (Deepgram recommended)
+  try {
+    const grantRes = await fetch("https://api.deepgram.com/v1/auth/grant", {
+      method: "POST",
+      headers: {
+        Authorization: "Token " + apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ttl_seconds: 3600 }),
+    });
+    if (grantRes.ok) {
+      const data = await grantRes.json();
+      if (data.access_token) {
+        return res.json({ key: data.access_token, temporary: true });
+      }
+    } else {
+      const errBody = await grantRes.text().catch(() => "");
+      console.error(
+        "[Deepgram] JWT grant failed:",
+        grantRes.status,
+        errBody.slice(0, 200)
+      );
+    }
+  } catch (err) {
+    console.error(
+      "[Deepgram] JWT grant error:",
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+
   const projectId = process.env.DEEPGRAM_PROJECT_ID;
 
   if (projectId) {

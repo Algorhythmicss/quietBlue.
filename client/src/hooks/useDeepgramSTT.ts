@@ -88,6 +88,73 @@ export function useDeepgramSTT(
     }
   }, []);
 
+  const fetchToken = useCallback(async (): Promise<
+    { ok: true; key: string } | { ok: false; message: string }
+  > => {
+    const attempt = async () => {
+      const tokenRes = await fetch(DEEPGRAM_TOKEN_URL);
+      if (!tokenRes.ok) {
+        const payload = (await tokenRes.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        const backendDown =
+          tokenRes.status === 500 ||
+          tokenRes.status === 502 ||
+          tokenRes.status === 503 ||
+          tokenRes.status === 504;
+
+        if (tokenRes.status === 503 && payload.error?.includes("DEEPGRAM")) {
+          return {
+            ok: false as const,
+            message: IS_DEV
+              ? "Deepgram API key missing on server. Set DEEPGRAM_API_KEY in server/.env."
+              : "Voice service not configured. Set DEEPGRAM_API_KEY in Render → Environment, then redeploy.",
+          };
+        }
+        if (backendDown) {
+          return {
+            ok: false as const,
+            message: IS_DEV
+              ? "Backend not running. In a terminal run: cd server && node index.js — then tap the mic to retry."
+              : `Server waking up or unavailable (HTTP ${tokenRes.status}). Wait a few seconds and tap the mic again.`,
+          };
+        }
+        return {
+          ok: false as const,
+          message:
+            payload.error ||
+              `Voice token request failed (HTTP ${tokenRes.status}). Tap the mic to retry.`,
+        };
+      }
+      const data = (await tokenRes.json()) as { key?: string };
+      if (!data.key) {
+        return {
+          ok: false as const,
+          message: IS_DEV
+            ? "Deepgram API key missing on server. Set DEEPGRAM_API_KEY in server/.env."
+            : "Voice service not configured. Set DEEPGRAM_API_KEY in Render → Environment, then redeploy.",
+        };
+      }
+      return { ok: true as const, key: data.key };
+    };
+
+    try {
+      const first = await attempt();
+      if (first.ok || IS_DEV) return first;
+      // Render free tier cold start — retry once after a short pause
+      await new Promise((r) => setTimeout(r, 2500));
+      return attempt();
+    } catch (err) {
+      console.error("[Deepgram STT] Token fetch failed", err);
+      return {
+        ok: false as const,
+        message: IS_DEV
+          ? "Cannot reach backend. Start the server (cd server && node index.js), open http://localhost:5173, then tap the mic to retry."
+          : "Cannot reach the API. If the app just loaded, wait a few seconds for the server to wake up, then tap the mic again.",
+      };
+    }
+  }, []);
+
   const start = useCallback(async () => {
     const isReconnect = isReconnectingRef.current;
     isReconnectingRef.current = false;
@@ -101,60 +168,13 @@ export function useDeepgramSTT(
     setError(null);
 
     let key: string;
-    try {
-      const tokenRes = await fetch(DEEPGRAM_TOKEN_URL);
-      if (!tokenRes.ok) {
-        const payload = (await tokenRes.json().catch(() => ({}))) as {
-          error?: string;
-        };
-        const backendDown =
-          tokenRes.status === 500 ||
-          tokenRes.status === 502 ||
-          tokenRes.status === 503 ||
-          tokenRes.status === 504;
-
-        if (tokenRes.status === 503 && payload.error?.includes("DEEPGRAM")) {
-          setError(
-            IS_DEV
-              ? "Deepgram API key missing on server. Set DEEPGRAM_API_KEY in server/.env."
-              : "Voice service not configured. Set DEEPGRAM_API_KEY in Render → Environment, then redeploy."
-          );
-        } else if (backendDown) {
-          setError(
-            IS_DEV
-              ? "Backend not running. In a terminal run: cd server && node index.js — then tap the mic to retry."
-              : `Server unavailable (HTTP ${tokenRes.status}). Check Render logs and that the web service is running.`
-          );
-        } else {
-          setError(
-            payload.error ||
-              `Voice token request failed (HTTP ${tokenRes.status}). Tap the mic to retry.`
-          );
-        }
-        setIsListening(false);
-        return;
-      }
-      const data = (await tokenRes.json()) as { key?: string };
-      if (!data.key) {
-        setError(
-          IS_DEV
-            ? "Deepgram API key missing on server. Set DEEPGRAM_API_KEY in server/.env."
-            : "Voice service not configured. Set DEEPGRAM_API_KEY in Render → Environment, then redeploy."
-        );
-        setIsListening(false);
-        return;
-      }
-      key = data.key;
-    } catch (err) {
-      console.error("[Deepgram STT] Token fetch failed", err);
-      setError(
-        IS_DEV
-          ? "Cannot reach backend. Start the server (cd server && node index.js), open http://localhost:5173, then tap the mic to retry."
-          : "Cannot reach the API. For a single Render service, leave VITE_API_URL unset. For split deploy, set VITE_API_URL to your backend URL at build time."
-      );
+    const tokenResult = await fetchToken();
+    if (!tokenResult.ok) {
+      setError(tokenResult.message);
       setIsListening(false);
       return;
     }
+    key = tokenResult.key;
 
     let stream: MediaStream;
     try {
@@ -181,12 +201,12 @@ export function useDeepgramSTT(
       ? "audio/webm;codecs=opus"
       : "audio/webm";
 
-    // Browsers cannot set Authorization on WebSocket; Deepgram uses subprotocol auth.
-    // Note: utterance_end_ms rejects the handshake (1006); endpointing alone handles pauses.
     const wsUrl =
       "wss://api.deepgram.com/v1/listen?model=nova-2&language=en-IN&punctuate=true&endpointing=600&interim_results=true";
     const ws = new WebSocket(wsUrl, ["token", key]);
     wsRef.current = ws;
+
+    const wsOpenedRef = { current: false };
 
     const recorder = new MediaRecorder(stream, { mimeType });
     mediaRecorderRef.current = recorder;
@@ -201,7 +221,9 @@ export function useDeepgramSTT(
     };
 
     ws.onopen = () => {
+      wsOpenedRef.current = true;
       reconnectCountRef.current = 0;
+      setError(null);
       recorder.start(250);
       setIsListening(true);
       if (!isReconnect) {
@@ -229,11 +251,13 @@ export function useDeepgramSTT(
 
     ws.onerror = (event) => {
       console.error("[Deepgram STT] WebSocket error", event);
-      setError(
-        IS_DEV
-          ? "Voice connection lost. Tap mic to reconnect."
-          : "Voice connection failed. Check DEEPGRAM_API_KEY on the server and tap mic to retry."
-      );
+      if (!wsOpenedRef.current && !manualStopRef.current) {
+        setError(
+          IS_DEV
+            ? "Voice connection lost. Tap mic to reconnect."
+            : "Voice connection failed. Tap the mic to retry — allow microphone access if prompted."
+        );
+      }
     };
 
     ws.onclose = (event) => {
@@ -250,6 +274,17 @@ export function useDeepgramSTT(
       cleanupSession();
       setIsListening(false);
 
+      if (!wsOpenedRef.current) {
+        if (!manualStopRef.current) {
+          setError(
+            event.code === 1006
+              ? "Voice connection rejected. Tap the mic to retry."
+              : "Voice connection failed. Tap the mic to retry."
+          );
+        }
+        return;
+      }
+
       if (reconnectCountRef.current < 3) {
         reconnectCountRef.current += 1;
         setTimeout(() => {
@@ -262,7 +297,7 @@ export function useDeepgramSTT(
         setError("Voice connection lost. Tap mic to reconnect.");
       }
     };
-  }, [cleanupSession]);
+  }, [cleanupSession, fetchToken]);
 
   startRef.current = start;
 
