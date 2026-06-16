@@ -839,6 +839,20 @@ body {
   border-color: rgba(210, 145, 30, 0.38);
 }
 
+.voice-layer-status--error {
+  background: rgba(205, 65, 65, 0.12);
+  border-color: rgba(205, 65, 65, 0.35);
+}
+
+.voice-layer-status--error .voice-layer-status-text {
+  color: #8a2020;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  line-height: 1.45;
+  text-align: center;
+}
+
 .voice-layer-status-spinner {
   width: 16px;
   height: 16px;

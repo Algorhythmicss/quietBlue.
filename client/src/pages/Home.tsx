@@ -16,6 +16,7 @@ import {
   isFeelItResult,
   type LookupResult as Result,
 } from "../types/lookup";
+import { apiUrl } from "../lib/apiBase";
 
 type Mode = "quick" | "simple" | "feel-it";
 
@@ -30,10 +31,6 @@ const MODE_TOOLTIPS: Record<Mode, string> = {
   "feel-it":
     "Meaning through the lens of your book — lock it once, use it always",
 };
-
-// Change this to your backend URL if deploying separately
-// e.g. "https://your-backend.railway.app"
-const API_BASE = "";
 
 export default function Home() {
   const [query, setQuery] = useState("");
@@ -143,7 +140,7 @@ export default function Home() {
         body.bookContext = bookContext;
       }
 
-      const res = await fetch(`${API_BASE}/api/lookup`, {
+      const res = await fetch(apiUrl("/api/lookup"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

@@ -5,6 +5,7 @@ import { useDeepgramSTT } from "../hooks/useDeepgramSTT";
 import { useTTS } from "../hooks/useTTS";
 import { extractTargetWord } from "../lib/extractWord";
 import { playPing } from "../lib/playPing";
+import { apiUrl } from "../lib/apiBase";
 import type { LookupResult } from "../types/lookup";
 
 type VoiceMode = "quick" | "simple" | "feel-it";
@@ -130,7 +131,7 @@ export default function VoiceLayer({
           body.bookContext = ctx;
         }
 
-        const res = await fetch("/api/lookup", {
+        const res = await fetch(apiUrl("/api/lookup"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -223,7 +224,10 @@ export default function VoiceLayer({
     stt.stop();
   };
 
-  const showStatusCard = status === "listening" || status === "fetching";
+  const showStatusCard =
+    status === "listening" ||
+    status === "fetching" ||
+    (status === "error" && !!micError);
 
   return (
     <div className="voice-layer">
@@ -246,6 +250,7 @@ export default function VoiceLayer({
           ].join(" ")}
           aria-live="polite"
           aria-busy={status === "fetching"}
+          role={status === "error" ? "alert" : undefined}
         >
           {status === "fetching" && (
             <span
@@ -254,7 +259,11 @@ export default function VoiceLayer({
             />
           )}
           <span className="voice-layer-status-text">
-            {status === "listening" ? "Listening…" : "Looking up…"}
+            {status === "listening"
+              ? "Listening…"
+              : status === "fetching"
+                ? "Looking up…"
+                : micError}
           </span>
         </div>
       )}

@@ -307,18 +307,38 @@ app.post("/api/tts", async (req, res) => {
   return res.status(500).json({ error: "TTS unavailable" });
 });
 
+const distPath = join(__dirname, "..", "client", "dist");
+
+// ── Health check (Render / monitoring) ──────────────────────────────────────
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    deepgram: !!process.env.DEEPGRAM_API_KEY,
+    gemini: !!process.env.GEMINI_API_KEY,
+    tts: !!(process.env.SARVAM_API_KEY || process.env.OPENAI_API_KEY),
+    frontend: existsSync(distPath),
+  });
+});
+
 // ── Deepgram Token Route ────────────────────────────────────────────────────
 app.get("/api/deepgram-token", async (req, res) => {
+  const apiKey = process.env.DEEPGRAM_API_KEY;
+
+  if (!apiKey) {
+    console.error("[Deepgram] DEEPGRAM_API_KEY not set");
+    return res.status(503).json({ error: "DEEPGRAM_API_KEY not configured" });
+  }
+
   const projectId = process.env.DEEPGRAM_PROJECT_ID;
 
-  if (projectId && process.env.DEEPGRAM_API_KEY) {
+  if (projectId) {
     try {
       const dgRes = await fetch(
         `https://api.deepgram.com/v1/projects/${projectId}/keys`,
         {
           method: "POST",
           headers: {
-            Authorization: "Token " + process.env.DEEPGRAM_API_KEY,
+            Authorization: "Token " + apiKey,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
@@ -333,23 +353,47 @@ app.get("/api/deepgram-token", async (req, res) => {
         const data = await dgRes.json();
         return res.json({ key: data.key, temporary: true });
       }
-    } catch {}
+
+      const errBody = await dgRes.text().catch(() => "");
+      console.error(
+        "[Deepgram] Temp key creation failed:",
+        dgRes.status,
+        errBody.slice(0, 200)
+      );
+    } catch (err) {
+      console.error(
+        "[Deepgram] Temp key error:",
+        err instanceof Error ? err.message : String(err)
+      );
+    }
   }
 
-  return res.json({ key: process.env.DEEPGRAM_API_KEY, temporary: false });
+  return res.json({ key: apiKey, temporary: false });
 });
 
 // ── Serve built frontend in production ───────────────────────────────────────
-const distPath = join(__dirname, "..", "client", "dist");
 if (existsSync(distPath)) {
   app.use(express.static(distPath));
-  app.get("/{*splat}", (req, res) => {
+  app.get("/{*splat}", (req, res, next) => {
+    if (req.path.startsWith("/api/")) {
+      return next();
+    }
     res.sendFile(join(distPath, "index.html"));
   });
+} else {
+  console.warn(
+    "[quietBlue] client/dist not found — run: cd client && npm run build"
+  );
 }
 
 app.listen(PORT, () => {
-  console.log(`quietBlue server running on http://localhost:${PORT}`);
+  console.log(`quietBlue server running on port ${PORT}`);
+  console.log(
+    `[quietBlue] frontend: ${existsSync(distPath) ? "serving client/dist" : "NOT BUILT"}`
+  );
+  console.log(
+    `[quietBlue] deepgram: ${process.env.DEEPGRAM_API_KEY ? "configured" : "MISSING — mic will fail"}`
+  );
 });
 
 setInterval(sweepExpiredCache, 30 * 60 * 1000);

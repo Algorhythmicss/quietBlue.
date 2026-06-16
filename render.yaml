@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: quietblue
+    runtime: node
+    plan: free
+    buildCommand: cd client && npm ci && npm run build && cd ../server && npm ci
+    startCommand: cd server && node index.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: DEEPGRAM_PROJECT_ID
+        sync: false
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false

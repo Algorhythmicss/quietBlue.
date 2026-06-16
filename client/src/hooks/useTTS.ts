@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getAudioContext } from "../lib/audioContext";
+import { apiUrl } from "../lib/apiBase";
 
-/** Relative URL — Vite proxies /api → localhost:3001 in dev; Express serves it in prod. */
-const TTS_URL = "/api/tts";
+const TTS_URL = apiUrl("/api/tts");
 
 /** Tiny silent WAV — unlocks autoplay when played during a user gesture. */
 const SILENT_WAV =

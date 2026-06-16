@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { apiUrl, IS_DEV } from "../lib/apiBase";
 
-/** Relative URL — Vite proxies /api → localhost:3001 in dev; Express serves it in prod. */
-const DEEPGRAM_TOKEN_URL = "/api/deepgram-token";
+const DEEPGRAM_TOKEN_URL = apiUrl("/api/deepgram-token");
 
 export interface UseDeepgramSTTOptions {
   onFinal: (transcript: string) => void;
@@ -104,23 +104,42 @@ export function useDeepgramSTT(
     try {
       const tokenRes = await fetch(DEEPGRAM_TOKEN_URL);
       if (!tokenRes.ok) {
+        const payload = (await tokenRes.json().catch(() => ({}))) as {
+          error?: string;
+        };
         const backendDown =
           tokenRes.status === 500 ||
           tokenRes.status === 502 ||
           tokenRes.status === 503 ||
           tokenRes.status === 504;
-        setError(
-          backendDown
-            ? "Backend not running. Start it: cd server && node index.js"
-            : `Voice token request failed (HTTP ${tokenRes.status}).`
-        );
+
+        if (tokenRes.status === 503 && payload.error?.includes("DEEPGRAM")) {
+          setError(
+            IS_DEV
+              ? "Deepgram API key missing on server. Set DEEPGRAM_API_KEY in server/.env."
+              : "Voice service not configured. Set DEEPGRAM_API_KEY in Render → Environment, then redeploy."
+          );
+        } else if (backendDown) {
+          setError(
+            IS_DEV
+              ? "Backend not running. In a terminal run: cd server && node index.js — then tap the mic to retry."
+              : `Server unavailable (HTTP ${tokenRes.status}). Check Render logs and that the web service is running.`
+          );
+        } else {
+          setError(
+            payload.error ||
+              `Voice token request failed (HTTP ${tokenRes.status}). Tap the mic to retry.`
+          );
+        }
         setIsListening(false);
         return;
       }
       const data = (await tokenRes.json()) as { key?: string };
       if (!data.key) {
         setError(
-          "Deepgram API key missing on server. Set DEEPGRAM_API_KEY in server/.env."
+          IS_DEV
+            ? "Deepgram API key missing on server. Set DEEPGRAM_API_KEY in server/.env."
+            : "Voice service not configured. Set DEEPGRAM_API_KEY in Render → Environment, then redeploy."
         );
         setIsListening(false);
         return;
@@ -129,7 +148,9 @@ export function useDeepgramSTT(
     } catch (err) {
       console.error("[Deepgram STT] Token fetch failed", err);
       setError(
-        "Cannot reach backend. Run the server on port 3001 and open the app at http://localhost:5173."
+        IS_DEV
+          ? "Cannot reach backend. Start the server (cd server && node index.js), open http://localhost:5173, then tap the mic to retry."
+          : "Cannot reach the API. For a single Render service, leave VITE_API_URL unset. For split deploy, set VITE_API_URL to your backend URL at build time."
       );
       setIsListening(false);
       return;
@@ -208,7 +229,11 @@ export function useDeepgramSTT(
 
     ws.onerror = (event) => {
       console.error("[Deepgram STT] WebSocket error", event);
-      setError("Voice connection lost. Tap mic to reconnect.");
+      setError(
+        IS_DEV
+          ? "Voice connection lost. Tap mic to reconnect."
+          : "Voice connection failed. Check DEEPGRAM_API_KEY on the server and tap mic to retry."
+      );
     };
 
     ws.onclose = (event) => {
