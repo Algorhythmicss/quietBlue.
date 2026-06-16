@@ -12,8 +12,125 @@ dotenv.config({ path: join(__dirname, "..", ".env") });
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_MODELS = [
+  GEMINI_MODEL,
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+].filter((name, index, all) => all.indexOf(name) === index);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+function getGeminiModel(modelName) {
+  return genAI.getGenerativeModel({
+    model: modelName,
+    generationConfig: { responseMimeType: "application/json" },
+  });
+}
+
+function parseGeminiJson(text) {
+  const cleaned = text
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```\s*$/, "")
+    .trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (match) {
+      return JSON.parse(match[0]);
+    }
+    const err = new Error("Invalid JSON from Gemini");
+    throw err;
+  }
+}
+
+function isModelUnavailable(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  const status = err?.status;
+  return status === 404 || /not found for API|404/i.test(msg);
+}
+
+async function generateGeminiJson(prompt) {
+  if (!process.env.GEMINI_API_KEY) {
+    const err = new Error("GEMINI_API_KEY not configured");
+    err.status = 503;
+    throw err;
+  }
+
+  const maxRetries = 2;
+  let lastErr;
+
+  for (const modelName of GEMINI_MODELS) {
+    const model = getGeminiModel(modelName);
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const result = await model.generateContent(prompt);
+        return parseGeminiJson(result.response.text().trim());
+      } catch (err) {
+        lastErr = err;
+        const status = err?.status;
+        const retryable = status === 503 || status === 429;
+
+        if (retryable && attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+          continue;
+        }
+
+        if (isModelUnavailable(err)) {
+          console.error(`[Gemini] ${modelName} unavailable, trying fallback`);
+          break;
+        }
+
+        throw err;
+      }
+    }
+  }
+
+  throw lastErr ?? new Error("Gemini unavailable");
+}
+
+function formatGeminiError(err, fallback) {
+  const msg = err instanceof Error ? err.message : String(err);
+  const status = err?.status;
+
+  if (/not configured/i.test(msg)) {
+    return "Gemini API key not configured on server.";
+  }
+  if (status === 429 || /quota|429|rate.?limit/i.test(msg)) {
+    return "Rate limit reached on Gemini API. Try again shortly.";
+  }
+  if (status === 503 || /high demand|overloaded/i.test(msg)) {
+    return "Gemini is temporarily overloaded. Try again in a moment.";
+  }
+  if (status === 404 || /not found for API|404/i.test(msg)) {
+    return "AI model unavailable. The server may need an update.";
+  }
+  if (
+    status === 401 ||
+    status === 403 ||
+    /API key|invalid.*key|unauthorized|permission denied/i.test(msg)
+  ) {
+    return "Gemini API key is invalid or unauthorized.";
+  }
+  if (/Invalid JSON|JSON\.parse|Unexpected token/i.test(msg)) {
+    return "AI returned an unexpected response. Try again.";
+  }
+  if (status) {
+    return `${fallback} (error ${status}). Try again shortly.`;
+  }
+  return `${fallback}. Try again shortly.`;
+}
+
+function logGeminiError(mode, err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error(
+    `[Gemini] ${mode} error:`,
+    err?.status ?? "unknown",
+    msg.slice(0, 300)
+  );
+}
 
 app.use(cors());
 app.use(express.json());
@@ -22,6 +139,7 @@ const definitionCache = new Map();
 const CACHE_TTL = {
   quick: 24 * 60 * 60 * 1000,
   simple: 60 * 60 * 1000,
+  "feel-it": 60 * 60 * 1000,
 };
 
 function cacheKey(mode, word) {
@@ -112,22 +230,13 @@ Format your response as JSON with this exact structure:
 
 Only return valid JSON, nothing else.`;
 
-      const result = await model.generateContent(prompt);
-      const text = result.response.text().trim();
-      const cleaned = text
-        .replace(/^```json\s*/i, "")
-        .replace(/```\s*$/, "")
-        .trim();
-      const response = JSON.parse(cleaned);
+      const response = await generateGeminiJson(prompt);
       setCached(mode, word, response);
       return res.json(response);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      logGeminiError("simple", err);
       return res.status(500).json({
-        error:
-          msg.includes("quota") || msg.includes("429")
-            ? "Rate limit reached on Gemini API. Try again shortly."
-            : "Failed to generate explanation",
+        error: formatGeminiError(err, "Failed to generate explanation"),
       });
     }
   }
@@ -138,6 +247,11 @@ Only return valid JSON, nothing else.`;
       return res
         .status(400)
         .json({ error: "bookContext.bookName is required for feel-it mode" });
+    }
+    const feelItKey = `${word.toLowerCase().trim()}:${bookContext.bookName.toLowerCase().trim()}`;
+    const cached = getCached(mode, feelItKey);
+    if (cached) {
+      return res.json({ ...cached, cached: true });
     }
     try {
       const contextNote = bookContext.description
@@ -158,20 +272,13 @@ Format your response as JSON with this exact structure:
 
 Only return valid JSON, nothing else.`;
 
-      const result = await model.generateContent(prompt);
-      const text = result.response.text().trim();
-      const cleaned = text
-        .replace(/^```json\s*/i, "")
-        .replace(/```\s*$/, "")
-        .trim();
-      return res.json(JSON.parse(cleaned));
+      const response = await generateGeminiJson(prompt);
+      setCached(mode, feelItKey, response);
+      return res.json(response);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      logGeminiError("feel-it", err);
       return res.status(500).json({
-        error:
-          msg.includes("quota") || msg.includes("429")
-            ? "Rate limit reached on Gemini API. Try again shortly."
-            : "Failed to generate contextual explanation",
+        error: formatGeminiError(err, "Failed to generate contextual explanation"),
       });
     }
   }
@@ -221,9 +328,23 @@ const SARVAM_V3_SPEAKERS = new Set([
   "niharika",
 ]);
 
+const CLIENT_VOICE_TO_SARVAM = {
+  meera: "priya",
+  priya: "priya",
+  shubh: "shubh",
+};
+
 function sarvamSpeaker(voice) {
   const v = typeof voice === "string" ? voice.toLowerCase() : "";
-  return SARVAM_V3_SPEAKERS.has(v) ? v : "shubh";
+  if (CLIENT_VOICE_TO_SARVAM[v]) {
+    return CLIENT_VOICE_TO_SARVAM[v];
+  }
+  return SARVAM_V3_SPEAKERS.has(v) ? v : "priya";
+}
+
+function prefersOpenAiVoice(voice) {
+  const v = typeof voice === "string" ? voice.toLowerCase() : "";
+  return v === "fable" || v === "nova";
 }
 
 // ── TTS Route ───────────────────────────────────────────────────────────────
@@ -234,7 +355,7 @@ app.post("/api/tts", async (req, res) => {
     return res.status(400).json({ error: "text is required" });
   }
 
-  if (process.env.SARVAM_API_KEY) {
+  if (process.env.SARVAM_API_KEY && !prefersOpenAiVoice(voice)) {
     try {
       const sarvamRes = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
@@ -267,7 +388,7 @@ app.post("/api/tts", async (req, res) => {
         err instanceof Error ? err.message : String(err)
       );
     }
-  } else {
+  } else if (!prefersOpenAiVoice(voice)) {
     console.error("[TTS] SARVAM_API_KEY not set");
   }
 
@@ -315,6 +436,7 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     deepgram: !!process.env.DEEPGRAM_API_KEY,
     gemini: !!process.env.GEMINI_API_KEY,
+    geminiModel: GEMINI_MODEL,
     tts: !!(process.env.SARVAM_API_KEY || process.env.OPENAI_API_KEY),
     frontend: existsSync(distPath),
   });
