@@ -15,9 +15,12 @@ const PORT = process.env.PORT || 3001;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_MODELS = [
   GEMINI_MODEL,
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash-lite",
   "gemini-2.0-flash",
-  "gemini-1.5-flash",
 ].filter((name, index, all) => all.indexOf(name) === index);
+const GEMINI_MAX_RETRIES = 3;
+const GEMINI_TIMEOUT_MS = 45_000;
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 function getGeminiModel(modelName) {
@@ -45,10 +48,41 @@ function parseGeminiJson(text) {
   }
 }
 
+function geminiBackoffMs(attempt) {
+  return Math.min(8000, 500 * 2 ** attempt);
+}
+
 function isModelUnavailable(err) {
   const msg = err instanceof Error ? err.message : String(err);
   const status = err?.status;
   return status === 404 || /not found for API|404/i.test(msg);
+}
+
+function isRetryableGeminiError(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  const status = err?.status;
+  return (
+    status === 503 ||
+    status === 429 ||
+    status === 504 ||
+    /high demand|overloaded|rate.?limit|429|503|timed out/i.test(msg)
+  );
+}
+
+function shouldTryFallbackModel(err) {
+  return isModelUnavailable(err) || isRetryableGeminiError(err);
+}
+
+async function generateGeminiContent(model, prompt) {
+  const request = model.generateContent(prompt);
+  const timeout = new Promise((_, reject) => {
+    setTimeout(() => {
+      const err = new Error("Gemini request timed out");
+      err.status = 504;
+      reject(err);
+    }, GEMINI_TIMEOUT_MS);
+  });
+  return Promise.race([request, timeout]);
 }
 
 async function generateGeminiJson(prompt) {
@@ -58,28 +92,31 @@ async function generateGeminiJson(prompt) {
     throw err;
   }
 
-  const maxRetries = 2;
   let lastErr;
 
   for (const modelName of GEMINI_MODELS) {
     const model = getGeminiModel(modelName);
 
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
       try {
-        const result = await model.generateContent(prompt);
+        const result = await generateGeminiContent(model, prompt);
         return parseGeminiJson(result.response.text().trim());
       } catch (err) {
         lastErr = err;
-        const status = err?.status;
-        const retryable = status === 503 || status === 429;
 
-        if (retryable && attempt < maxRetries) {
-          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        if (isRetryableGeminiError(err) && attempt < GEMINI_MAX_RETRIES) {
+          const delay = geminiBackoffMs(attempt);
+          console.error(
+            `[Gemini] ${modelName} retry ${attempt + 1}/${GEMINI_MAX_RETRIES} after ${err?.status ?? "error"} (${delay}ms)`
+          );
+          await new Promise((r) => setTimeout(r, delay));
           continue;
         }
 
-        if (isModelUnavailable(err)) {
-          console.error(`[Gemini] ${modelName} unavailable, trying fallback`);
+        if (shouldTryFallbackModel(err)) {
+          console.error(
+            `[Gemini] ${modelName} failed (${err?.status ?? "unknown"}), trying fallback`
+          );
           break;
         }
 

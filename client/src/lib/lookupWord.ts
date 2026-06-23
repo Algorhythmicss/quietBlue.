@@ -16,6 +16,10 @@ export function resolveLookupWord(input: string): string | null {
   return extractTargetWord(trimmed);
 }
 
+function isRetryableLookupError(message: string) {
+  return /overloaded|rate limit|try again/i.test(message);
+}
+
 export async function fetchLookup(
   word: string,
   mode: LookupMode,
@@ -26,18 +30,30 @@ export async function fetchLookup(
     body.bookContext = bookContext;
   }
 
-  const res = await fetch(apiUrl("/api/lookup"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const maxAttempts = 2;
+  let lastError = "Something went wrong.";
 
-  if (!res.ok) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const res = await fetch(apiUrl("/api/lookup"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (res.ok) {
+      return (await res.json()) as LookupResult;
+    }
+
     const data = await res.json().catch(() => ({}));
-    throw new Error(
-      (data as { error?: string }).error || "Something went wrong.",
-    );
+    lastError = (data as { error?: string }).error || lastError;
+
+    if (isRetryableLookupError(lastError) && attempt < maxAttempts - 1) {
+      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+      continue;
+    }
+
+    throw new Error(lastError);
   }
 
-  return (await res.json()) as LookupResult;
+  throw new Error(lastError);
 }
